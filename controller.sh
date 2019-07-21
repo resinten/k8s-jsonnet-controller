@@ -1,93 +1,99 @@
 #!/bin/bash
 
-function pipe() {
-    printf '%s' "$1"
-}
-
-function extract() {
-    local input="$1"
-    shift
-    pipe "$input" | jq -r "$@"
-}
+. ./functions.sh
 
 function monitor_resource() {
-    local resource="$1"
-    local directory="$2"
+  declare -r RESOURCE="$1"
+  declare -r DIRECTORY="$2"
 
-    declare -A resource_versions
+  declare -A resource_versions
 
-    kubectl get "$resource" -o json --watch |
-        jq -c --unbuffered |
-        while read -r line; do
-            local name="$(extract "$line" '.metadata.name')"
-            local spec="$(extract "$line" '.spec')"
-            local version="$(extract "$line" '.metadata.resourceVersion')"
-            local deleted="$(extract "$line" '.metadata.deletionTimestamp != null')"
+  kubectl get "$RESOURCE" -o json --watch \
+    | jq -c --unbuffered \
+    | while read -r line; do
+      #   obj="$(get_obj "$line")"
+      obj="$line"
 
-            local old_manifest="$(extract "$line" '.metadata.annotations.jsonnetManifest')"
-            local manifest="$(
-                jsonnet -y \
-                    -J lib \
-                    -J "$directory" \
-                    --ext-str "name=$name" \
-                    --ext-str "spec=$spec" \
-                    "./$directory/manifest.jsonnet"
-            )"
+      # echo "$obj" | jq '.'
 
-            echo -e "$manifest"
+      # Set object information
+      name="$(get_name "$obj")"
+      spec="$(get_spec "$obj")"
+      version="$(get_version "$obj")"
+      old_manifest="$(get_manifest "$obj")"
 
-            local event=""
+      # Set status check information
+      deleted="$(is_deleted "$line")"
+      finalizer_added="$(is_finalizer_added "$line")"
+      new_manifest="$(render_jsonnet "./$DIRECTORY/manifest.jsonnet")"
 
-            if [[ "$deleted" == "true" ]]; then
-                echo -e "Handling delete for $resource/$name"
-                pipe "$old_manifest" | kubectl delete -f -
-                event="ondelete"
-                unset resource_versions[$name]
-            else
-                if [[ -z "${resource_versions[$name]}" ]]; then
-                    echo "Handling create for $resource/$name"
-                    event="oncreate"
-                elif [[ "${resource_versions[$name]}" != "$version" ]]; then
-                    echo "Modified resource $resource/$name"
-                    event="onchange"
-                fi
+      # If the object is being deleted, then we need to purge the manifest
+      # and then remove the finalizer
+      if [[ "$deleted" == "true" ]]; then
+        echo -e "Handling delete for $RESOURCE/$name"
 
-                if [[ "$manifest" != "$old_manifest" ]]; then
-                    pipe "$manifest" | kubectl apply -f -
-                    pipe "$line" |
-                        jq \
-                            --arg manifest "$manifest" \
-                            '.metadata.annotations.jsonnetManifest |= $manifest' |
-                        kubectl apply -f -
-                fi
+        # We reset the obj value here because removing the finalizer will change the resourceVersion
+        remove_manifest "$old_manifest"
+        echo "Removing finalizer"
+        obj="$(remove_finalizer "$obj")"
+        version="$(get_version "$obj")"
+        echo "$obj" | jq
 
-                resource_versions[$name]="$version"
-            fi
+        # Remove the resource version information from the associative array
+        unset resource_versions[$name]
+        old_manifest=""
+        new_manifest=""
 
-            if [[ ! -z "$event" ]]; then
-                for f in $(find "$directory/$event" -name "*.jsonnet"); do
-                    echo -e "$event: Executing $f"
-                    jsonnet -y \
-                        -J lib \
-                        -J "$directory" \
-                        --ext-str "name=$name" \
-                        --ext-str "spec=$spec" \
-                        "$f" |
-                        kubectl apply -f -
-                done
-            fi
-        done
+        fire_event_handlers "ondelete"
+      elif [[ -z "${resource_versions[$name]}" && "$finalizer_added" == "false" ]]; then
+        echo "Handling create for $RESOURCE/$name"
+
+        # Add the finalizer and update the resource version variable
+        obj="$(add_finalizer)"
+        version="$(get_version "$obj")"
+
+        resource_versions[$name]="$version"
+        fire_event_handlers "oncreate"
+      elif [[ "${resource_versions[$name]}" != "$version" ]]; then
+        echo "Handling modify for $RESOURCE/$name"
+
+        resource_versions[$name]="$version"
+        fire_event_handlers "onchange"
+      fi
+
+      # If the manifest is different, then delete the old manifest, apply the new one,
+      # and update the manifest annotaition
+      if [[ "$new_manifest" != "$old_manifest" ]]; then
+        echo "Applying manifest"
+        echo -e "$new_manifest"
+
+        remove_manifest "$old_manifest"
+        add_manifest "$new_manifest"
+        obj="$(update_manifest "$new_manifest")"
+        version="$(get_version "$obj")"
+
+        resource_versions[$name]="$version"
+      fi
+
+      echo "Done"
+    done
 }
 
+if [[ -z "$CONTROLLER_NAME" ]]; then
+  declare -r CONTROLLER_NAME="jsonnet-controller"
+fi
+
 jq -c '.[]' <watches.json | {
-    while read -r line; do
-        resource="$(extract "$line" '.resource')"
-        directory="$(extract "$line" '.directory')"
+  while read -r obj; do
+    RESOURCE="$(extract "$obj" '.resource')"
+    DIRECTORY="$(extract "$obj" '.directory')"
 
-        echo "Starting monitor for $resource using directory $directory"
-        monitor_resource "$resource" "$directory" &
-    done
+    echo "Starting monitor for $RESOURCE using directory $DIRECTORY"
+    while [[ 1 ]]; do
+      monitor_resource "$RESOURCE" "$DIRECTORY"
+    done &
+  done
 
-    wait
-    echo "Exiting"
+  wait
+  echo "Exiting"
 }
