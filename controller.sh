@@ -8,13 +8,10 @@ function monitor_resource() {
 
   declare -A resource_versions
 
-  kubectl get "$RESOURCE" -o json --watch \
+  watch_forever \
     | jq -c --unbuffered \
     | while read -r line; do
-      #   obj="$(get_obj "$line")"
       obj="$line"
-
-      # echo "$obj" | jq '.'
 
       # Set object information
       name="$(get_name "$obj")"
@@ -29,53 +26,49 @@ function monitor_resource() {
 
       # If the object is being deleted, then we need to purge the manifest
       # and then remove the finalizer
-      if [[ "$deleted" == "true" ]]; then
-        echo -e "Handling delete for $RESOURCE/$name"
+      if [[ "$deleted" == "true" && "$finalizer_added" == "true" ]]; then
+        echo -e "[$RESOURCE] delete $name"
 
-        # We reset the obj value here because removing the finalizer will change the resourceVersion
-        remove_manifest "$old_manifest"
-        echo "Removing finalizer"
+        # We reset the obj value here because removing the finalizer
+        # will change the resourceVersion
+        remove_manifest "$old_manifest" &>/dev/null
         obj="$(remove_finalizer "$obj")"
         version="$(get_version "$obj")"
-        echo "$obj" | jq
 
         # Remove the resource version information from the associative array
         unset resource_versions[$name]
-        old_manifest=""
-        new_manifest=""
-
         fire_event_handlers "ondelete"
       elif [[ -z "${resource_versions[$name]}" && "$finalizer_added" == "false" ]]; then
-        echo "Handling create for $RESOURCE/$name"
+        echo "[$RESOURCE] create $name"
 
         # Add the finalizer and update the resource version variable
+        add_manifest "$new_manifest"
+        obj="$(update_manifest "$new_manifest")"
         obj="$(add_finalizer)"
         version="$(get_version "$obj")"
 
         resource_versions[$name]="$version"
         fire_event_handlers "oncreate"
       elif [[ "${resource_versions[$name]}" != "$version" ]]; then
-        echo "Handling modify for $RESOURCE/$name"
+        echo "[$RESOURCE] change $name"
 
-        resource_versions[$name]="$version"
-        fire_event_handlers "onchange"
+        # If the manifest is different, then delete the old manifest, apply the new one,
+        # and update the manifest annotaition
+        if [[ "$new_manifest" != "$old_manifest" ]]; then
+          echo "[$RESOURCE] applying manifest for $name"
+          echo -e "$new_manifest"
+
+          remove_manifest "$old_manifest"
+          add_manifest "$new_manifest"
+          obj="$(update_manifest "$new_manifest")"
+          version="$(get_version "$obj")"
+
+          resource_versions[$name]="$version"
+          fire_event_handlers "onchange"
+        else
+          echo "[$RESOURCE] $name manifest unchanged. skipping"
+        fi
       fi
-
-      # If the manifest is different, then delete the old manifest, apply the new one,
-      # and update the manifest annotaition
-      if [[ "$new_manifest" != "$old_manifest" ]]; then
-        echo "Applying manifest"
-        echo -e "$new_manifest"
-
-        remove_manifest "$old_manifest"
-        add_manifest "$new_manifest"
-        obj="$(update_manifest "$new_manifest")"
-        version="$(get_version "$obj")"
-
-        resource_versions[$name]="$version"
-      fi
-
-      echo "Done"
     done
 }
 
@@ -89,11 +82,10 @@ jq -c '.[]' <watches.json | {
     DIRECTORY="$(extract "$obj" '.directory')"
 
     echo "Starting monitor for $RESOURCE using directory $DIRECTORY"
-    while [[ 1 ]]; do
-      monitor_resource "$RESOURCE" "$DIRECTORY"
-    done &
+    monitor_resource "$RESOURCE" "$DIRECTORY" &
   done
 
+  trap "echo Interrupted. Killing monitors; killall background" SIGINT
   wait
   echo "Exiting"
 }

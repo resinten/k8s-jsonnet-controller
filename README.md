@@ -1,7 +1,5 @@
 # Kubernetes Jsonnet Controller
 
-_Work in progress!!_
-
 This controller lets you use Jsonnet to template your custom resources.
 It also provides an event handler system for create, modify, and delete events
 on your custom resources. These handlers are also Jsonnet templates, but they
@@ -36,4 +34,31 @@ in `mycustomresource-dir`. These will be templated and passed to `kubectl apply`
 jobs in this fashion, it is recommended that you use the `ObjectMeta` `generateName` feature to
 avoid name conflicts when jobs are run multiple times, particularly for `onchange` events.
 
-This project is a work in progress and is not completely functional yet.
+An example directory structure might look something like
+
+```
+.
+├── Dockerfile
+├── README.md
+├── controller.sh
+├── functions.sh
+├── lib
+├── mycustomresource
+│   ├── manifest.jsonnet
+│   ├── onchange
+│   ├── oncreate
+│   │   └── create-job.jsonnet
+│   └── ondelete
+└── watches.json
+```
+
+If you are using Docker, you can use the `bmwest/k8s-jsonnet-controller` image as a base with
+
+```
+FROM bmwest/k8s-jsonnet-controller:latest
+
+COPY watches.yaml .
+COPY mycustomresource ./mycustomresource
+```
+
+This project is a work in progress. If you encounter any issues, please report them on GitHub.

@@ -12,6 +12,12 @@ function extract() {
   pipe "$input" | jq -r "$@"
 }
 
+function watch_forever() {
+  while :; do
+    kubectl get "$RESOURCE" -o json --watch
+  done
+}
+
 # Accessors
 
 function get_obj() {
@@ -66,8 +72,8 @@ function render_jsonnet() {
 
 function fire_event_handlers() {
   for f in $(find "$DIRECTORY/$1" -name "*.jsonnet"); do
-    echo -e "$1: Executing $f"
-    render_jsonnet "$f" | kubectl apply -f - -o json
+    echo -e "[$RESOURCE]: $1: applying $f"
+    render_jsonnet "$f" | kubectl create -f -
   done
 }
 
