@@ -72,6 +72,8 @@ function monitor_resource() {
     done
 }
 
+trap "echo Interrupted. Killing monitors; killall background" SIGINT SIGQUIT
+
 if [[ -z "$CONTROLLER_NAME" ]]; then
   declare -r CONTROLLER_NAME="jsonnet-controller"
 fi
@@ -85,7 +87,6 @@ jq -c '.[]' <watches.json | {
     monitor_resource "$RESOURCE" "$DIRECTORY" &
   done
 
-  trap "echo Interrupted. Killing monitors; killall background" SIGINT
   wait
   echo "Exiting"
 }

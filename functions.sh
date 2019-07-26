@@ -14,7 +14,7 @@ function extract() {
 
 function watch_forever() {
   while :; do
-    kubectl get "$RESOURCE" -o json --watch
+    kubectl get "$RESOURCE" -o json --watch || break
   done
 }
 
@@ -66,7 +66,7 @@ function render_jsonnet() {
     -J lib \
     -J "$DIRECTORY" \
     --ext-str "name=$name" \
-    --ext-str "spec=$spec" \
+    --ext-code "spec=$spec" \
     "$file"
 }
 
